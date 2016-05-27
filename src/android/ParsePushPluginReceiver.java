@@ -61,13 +61,11 @@ public class ParsePushPluginReceiver extends ParsePushBroadcastReceiver
 	}
 
 	@Override
-   protected void onPushOpen(Context context, Intent intent) {
+    protected void onPushOpen(Context context, Intent intent) {
       JSONObject pnData = getPushData(intent);
       resetCount(getNotificationTag(context, pnData));
 
-      String uriString = pnData.optString("uri");
-      Intent activityIntent = uriString.isEmpty() ? new Intent(context, getActivity(context, intent))
-                                                  : new Intent(Intent.ACTION_VIEW, Uri.parse(uriString));
+      Intent activityIntent = new Intent(context, getActivity(context, intent));
 
       activityIntent.putExtras(intent)
                     .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_NEW_TASK);
