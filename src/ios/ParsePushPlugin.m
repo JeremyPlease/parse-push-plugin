@@ -1,17 +1,14 @@
 #import "ParsePushPlugin.h"
 #import <Cordova/CDV.h>
-//#import <objc/message.h>
 
 #import <Parse/Parse.h>
 
 @implementation ParsePushPlugin
 
-@synthesize callbackId;
-
-
 - (void)pluginInitialize {
     //store userInfo dictionaries if js callback is not yet registered.
     self.pnQueue = [NSMutableArray new];
+    self.hasRegistered = false;
 }
 
 - (void)registerCallback: (CDVInvokedUrlCommand*)command
@@ -22,13 +19,21 @@
     //
     self.callbackId = command.callbackId;
     CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
-    
+
     [pluginResult setKeepCallbackAsBool:YES];
     [self.commandDelegate sendPluginResult:pluginResult callbackId:self.callbackId];
-    
+
     if(self.pnQueue && self.pnQueue.count){
         [self flushPushNotificationQueue];
     }
+}
+
+- (void)register:(CDVInvokedUrlCommand *)command
+{
+    [self registerForPN];
+
+    CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
+    [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
 }
 
 - (void)getInstallationId:(CDVInvokedUrlCommand*) command
@@ -99,53 +104,85 @@
     [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
 }
 
-- (void)jsCallback: (NSDictionary*)userInfo withAction: (NSString*)pnAction
-{
+- (void)resetBadge:(CDVInvokedUrlCommand *)command {
+     CDVPluginResult* pluginResult = nil;
+     PFInstallation *currentInstallation = [PFInstallation currentInstallation];
+     currentInstallation.badge = 0;
+
+     [currentInstallation saveInBackground];
+     pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
+     [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+}
+
+
+- (void)registerForPN {
     //
-    // Trigger javascript callback because a PN has been received or opened
+    // carries out the actual device registration for push notification
     //
-    //
-    
-    if(self.callbackId){
-        //
-        // format the pn payload to be just 1 level deep and consistent with other platform versions of this plugin
-        NSMutableDictionary* pnPayload = [NSMutableDictionary dictionaryWithDictionary:userInfo];
-        [pnPayload addEntriesFromDictionary:pnPayload[@"aps"]];
-        [pnPayload removeObjectForKey:@"aps"];
-        
-        NSArray* callbackArgs = [NSArray arrayWithObjects:pnPayload, pnAction, nil];
-        CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsMultipart:callbackArgs];
-        
-        [pluginResult setKeepCallbackAsBool:YES];
-        [self.commandDelegate sendPluginResult:pluginResult callbackId:self.callbackId];
-    } else{
-        //callback has not been registered by the js side,
-        //put userInfo into queue. Will be flushed when callback is registered
-        if(self.pnQueue.count <= 10){
-            NSMutableDictionary* userInfoWithPnAction = [NSMutableDictionary dictionaryWithDictionary:userInfo];
-            userInfoWithPnAction[@"pnAction"] = pnAction;
-            [self.pnQueue addObject:userInfoWithPnAction];
-        } //if more than 10 items, stop queuing
+    UIApplication *application = [UIApplication sharedApplication];
+
+    if(!self.hasRegistered){
+        NSLog(@"ParsePushPlugin is registering your device for PN");
+        UIUserNotificationType userNotificationTypes = (UIUserNotificationTypeAlert | UIUserNotificationTypeBadge | UIUserNotificationTypeSound);
+        UIUserNotificationSettings *settings = [UIUserNotificationSettings settingsForTypes:userNotificationTypes categories:nil];
+        [application registerUserNotificationSettings:settings];
+        [application registerForRemoteNotifications];
+
+        self.hasRegistered = true;
     }
 }
 
-- (void)flushPushNotificationQueue{
-    while(self.pnQueue && self.pnQueue.count){
-        //
-        // de-queue the oldest pn and trigger callback
-        NSDictionary* userInfo = self.pnQueue[0];
-        [self.pnQueue removeObjectAtIndex:0];
-        
-        [self jsCallback:userInfo withAction:userInfo[@"pnAction"]];
-    }
+- (void)jsCallback: (NSDictionary*)userInfo withAction: (NSString*)pnAction
+{
+   //
+   // format the pn payload to be just 1 level deep and consistent with other platform versions of this plugin
+   NSMutableDictionary* pnPayload = [NSMutableDictionary dictionaryWithDictionary:userInfo];
+   [pnPayload addEntriesFromDictionary:pnPayload[@"aps"]];
+   [pnPayload removeObjectForKey:@"aps"];
+
+   NSArray* callbackArgs = [NSArray arrayWithObjects:pnPayload, pnAction, nil];
+   CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsMultipart:callbackArgs];
+   [pluginResult setKeepCallbackAsBool:YES];
+
+   if(self.callbackId){
+      [self.commandDelegate sendPluginResult:pluginResult callbackId:self.callbackId];
+   } else{
+      //
+      //callback has not been registered by the js side,
+      //queue things up so it can be flushed when js callback is registered.
+      //cap queue size at reasonable number
+      //
+      if(self.pnQueue.count <= 10){
+         [self.pnQueue addObject:pluginResult];
+      }
+   }
+}
+
+- (void)flushPushNotificationQueue
+{
+   while(self.pnQueue && self.pnQueue.count){
+      //
+      // de-queue the oldest pn and trigger callback
+      CDVPluginResult* pluginResult = self.pnQueue[0];
+      [self.pnQueue removeObjectAtIndex:0];
+
+      [self.commandDelegate sendPluginResult:pluginResult callbackId:self.callbackId];
+   }
+}
+
+- (NSString *)getConfigForKey:(NSString *)key
+{
+   //
+   // get config.xml <preference> settings
+   //
+   return [self.commandDelegate.settings objectForKey:[key lowercaseString]];
 }
 
 + (void)saveDeviceTokenToInstallation: (NSData*)deviceToken
 {
-    PFInstallation *currentInstallation = [PFInstallation currentInstallation];
-    [currentInstallation setDeviceTokenFromData:deviceToken];
-    [currentInstallation saveInBackground];
+   PFInstallation *currentInstallation = [PFInstallation currentInstallation];
+   [currentInstallation setDeviceTokenFromData:deviceToken];
+   [currentInstallation saveInBackground];
 }
 
 @end
-
